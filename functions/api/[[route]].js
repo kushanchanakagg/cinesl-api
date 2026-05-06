@@ -67,7 +67,7 @@ function withTimeout(promise, ms) {
 
 async function fetchUpstream(url, redirects = 0, extraHeaders = {}) {
     if (redirects > 5) throw new Error('redirect loop');
-    const proxyUrl = `https://your-php-server.com/proxy.php?url=${encodeURIComponent(url)}`;
+    const proxyUrl = `https://cdn.cinesl.top/proxy.php?url=${encodeURIComponent(url)}`;
     const res = await fetch(proxyUrl, {
         headers: { 'User-Agent': getUA(), ...extraHeaders },
         redirect: 'manual',
@@ -90,12 +90,12 @@ function rewriteM3u8(body, url, extraParam = '', absoluteBase = '') {
             return t.replace(/URI="([^"]+)"/g, (match, uri) => {
                 const abs = uri.startsWith('http') ? uri : uri.startsWith('/') ? origin + uri : dir + uri;
                 if (abs.includes('tiktokcdn.com')) return `URI="${abs}"`;
-                return `URI="https://your-php-server.com/proxy.php?url=${encodeURIComponent(abs)}${extraParam}"`;
+                return `URI="https://cdn.cinesl.top/proxy.php?url=${encodeURIComponent(abs)}${extraParam}"`;
             });
         }
         const abs = t.startsWith('http') ? t : t.startsWith('/') ? origin + t : dir + t;
         if (abs.includes('tiktokcdn.com') || abs.includes('p16-sg') || abs.includes('p19-sg')) return `https://your-php-server.com/proxy.php?url=${encodeURIComponent(abs)}&tt=1`;
-        return `https://your-php-server.com/proxy.php?url=${encodeURIComponent(abs)}${extraParam}`;
+        return `https://cdn.cinesl.top/proxy.php?url=${encodeURIComponent(abs)}${extraParam}`;
     }).join('\n');
 }
 
@@ -128,14 +128,14 @@ function wrapUrl(rawUrl, sourceKey) {
     const raw = typeof rawUrl === 'object' ? rawUrl.url : rawUrl;
     const cfg = SOURCE_MAP[sourceKey];
     if (!cfg || cfg.skipProxy) return raw;
-    return `https://your-php-server.com/proxy.php?url=${encodeURIComponent(raw)}&${cfg.proxyParam}=1`;
+    return `https://cdn.cinesl.top/proxy.php?url=${encodeURIComponent(raw)}&${cfg.proxyParam}=1`;
 }
 
 async function verifyStream(rawUrl, sourceKey) {
     const mod = SOURCE_MODULES[sourceKey];
     if (!mod.VERIFY_HEADERS) return true;
     try {
-        const proxyUrl = `https://your-php-server.com/proxy.php?url=${encodeURIComponent(rawUrl)}`;
+        const proxyUrl = `https://cdn.cinesl.top/proxy.php?url=${encodeURIComponent(rawUrl)}`;
         const res = await Promise.race([
             fetch(proxyUrl, { headers: { 'User-Agent': getUA(), ...mod.VERIFY_HEADERS } }),
             new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 8000))
