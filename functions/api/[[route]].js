@@ -67,7 +67,8 @@ function withTimeout(promise, ms) {
 
 async function fetchUpstream(url, redirects = 0, extraHeaders = {}) {
     if (redirects > 5) throw new Error('redirect loop');
-    const res = await fetch(url, {
+    const proxyUrl = `https://your-php-server.com/proxy.php?url=${encodeURIComponent(url)}`;
+    const res = await fetch(proxyUrl, {
         headers: { 'User-Agent': getUA(), ...extraHeaders },
         redirect: 'manual',
     });
@@ -89,12 +90,12 @@ function rewriteM3u8(body, url, extraParam = '', absoluteBase = '') {
             return t.replace(/URI="([^"]+)"/g, (match, uri) => {
                 const abs = uri.startsWith('http') ? uri : uri.startsWith('/') ? origin + uri : dir + uri;
                 if (abs.includes('tiktokcdn.com')) return `URI="${abs}"`;
-                return `URI="${absoluteBase}/api?url=${encodeURIComponent(abs)}${extraParam}"`;
+                return `URI="https://your-php-server.com/proxy.php?url=${encodeURIComponent(abs)}${extraParam}"`;
             });
         }
         const abs = t.startsWith('http') ? t : t.startsWith('/') ? origin + t : dir + t;
-        if (abs.includes('tiktokcdn.com') || abs.includes('p16-sg') || abs.includes('p19-sg')) return (absoluteBase || '') + '/api?url=' + encodeURIComponent(abs) + '&tt=1';
-        return (absoluteBase || '') + '/api?url=' + encodeURIComponent(abs) + extraParam;
+        if (abs.includes('tiktokcdn.com') || abs.includes('p16-sg') || abs.includes('p19-sg')) return `https://your-php-server.com/proxy.php?url=${encodeURIComponent(abs)}&tt=1`;
+        return `https://your-php-server.com/proxy.php?url=${encodeURIComponent(abs)}${extraParam}`;
     }).join('\n');
 }
 
@@ -127,15 +128,16 @@ function wrapUrl(rawUrl, sourceKey) {
     const raw = typeof rawUrl === 'object' ? rawUrl.url : rawUrl;
     const cfg = SOURCE_MAP[sourceKey];
     if (!cfg || cfg.skipProxy) return raw;
-    return '/api?url=' + encodeURIComponent(raw) + '&' + cfg.proxyParam + '=1';
+    return `https://your-php-server.com/proxy.php?url=${encodeURIComponent(raw)}&${cfg.proxyParam}=1`;
 }
 
 async function verifyStream(rawUrl, sourceKey) {
     const mod = SOURCE_MODULES[sourceKey];
     if (!mod.VERIFY_HEADERS) return true;
     try {
+        const proxyUrl = `https://your-php-server.com/proxy.php?url=${encodeURIComponent(rawUrl)}`;
         const res = await Promise.race([
-            fetchUpstream(rawUrl, 0, { 'User-Agent': getUA(), ...mod.VERIFY_HEADERS }),
+            fetch(proxyUrl, { headers: { 'User-Agent': getUA(), ...mod.VERIFY_HEADERS } }),
             new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 8000))
         ]);
         if (res.status >= 400) return false;
@@ -370,7 +372,8 @@ export async function onRequest({ request, env }) {
             try {
                 const rawUrl = decodeURIComponent(q.url || q.proxy);
                 if (q.tt) {
-                    const upstream = await fetchUpstream(rawUrl);
+                    const proxyUrl = `https://cdn.cinesl.top/proxy.php?url=${encodeURIComponent(rawUrl)}&tt=1`;
+                    const upstream = await fetch(proxyUrl);
                     const buf = await upstream.arrayBuffer();
                     const full = new Uint8Array(buf);
                     const stripped = full[0] === 0x89 ? full.slice(120) : full;
@@ -394,28 +397,31 @@ export async function onRequest({ request, env }) {
 
                     const looksLikeM3u8 = /\.m3u8?(\?|$)/i.test(rawUrl) || rawUrl.includes('/playlist/');
                     if (looksLikeM3u8) {
-                        const upstream = await fetchUpstream(rawUrl, 0, extraHeaders);
+                        const proxyUrl = `https://cdn.cinesl.top/proxy.php?url=${encodeURIComponent(rawUrl)}`;
+                        const upstream = await fetch(proxyUrl, { headers: extraHeaders });
                         const text = await upstream.text();
                         if (text.trim().startsWith('#EXTM3U')) {
-                            const rewritten = rewriteM3u8(text, rawUrl, `&${cfg.proxyParam}=1`, reqUrl.origin);
+                            const rewritten = rewriteM3u8(text, rawUrl, `&${cfg.proxyParam}=1`);
                             return new Response(rewritten, { headers: { 'Content-Type': 'application/vnd.apple.mpegurl', 'Access-Control-Allow-Origin': '*' } });
                         }
                         const ct2 = (upstream.headers.get('content-type') || 'application/octet-stream').toLowerCase();
                         return new Response(text, { headers: { 'Content-Type': ct2, 'Access-Control-Allow-Origin': '*' } });
                     }
-                    const upstream = await fetch(rawUrl, {
+                    const proxyUrl = `https://cdn.cinesl.top/proxy.php?url=${encodeURIComponent(rawUrl)}`;
+                    const upstream = await fetch(proxyUrl, {
                         headers: { 'User-Agent': getUA(), ...extraHeaders },
                         redirect: 'follow',
                     });
                     const ct = (upstream.headers.get('content-type') || '').toLowerCase();
                     if (ct.includes('mpegurl') || ct.includes('m3u8')) {
                         const text = await upstream.text();
-                        const rewritten = rewriteM3u8(text, rawUrl, `&${cfg.proxyParam}=1`, reqUrl.origin);
+                        const rewritten = rewriteM3u8(text, rawUrl, `&${cfg.proxyParam}=1`);
                         return new Response(rewritten, { headers: { 'Content-Type': 'application/vnd.apple.mpegurl', 'Access-Control-Allow-Origin': '*' } });
                     }
                     return new Response(upstream.body, { headers: { 'Content-Type': ct || 'video/MP2T', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'public, max-age=3600' } });
                 }
-                const upstream = await fetchUpstream(rawUrl);
+                const proxyUrl = `https://cdn.cinesl.top/proxy.php?url=${encodeURIComponent(rawUrl)}`;
+                const upstream = await fetch(proxyUrl);
                 const ct = (upstream.headers.get('content-type') || '').toLowerCase();
                 const isM3u8 = ct.includes('mpegurl') || ct.includes('m3u8') || /\.m3u8?(\?|$)/i.test(rawUrl);
                 if (isM3u8) {
