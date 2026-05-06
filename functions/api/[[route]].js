@@ -369,38 +369,9 @@ export async function onRequest({ request, env }) {
         if (q.url || q.proxy) {
             try {
                 const rawUrl = decodeURIComponent(q.url || q.proxy);
-                // Forward client headers to PHP proxy
-                const proxyUrl = `https://cdn.cinesl.top/proxy.php?url=${encodeURIComponent(rawUrl)}${q.tt ? '&tt=1' : ''}`;
-                // Get client headers to forward
-                const clientHeaders = {};
-                for (const [key, value] of request.headers.entries()) {
-                    if (key.startsWith('accept') || key.startsWith('user-agent') || key.startsWith('referer') || key.startsWith('origin')) {
-                        clientHeaders[key] = value;
-                    }
-                }
-                
-                if (q.tmdb_movie || q.tmdb_tv || q.tmdb_show || q.tmdb_season) {
-                    try {
-                        const k = env.TMDB_API_KEY;
-                        if (!k) return new Response(JSON.stringify({ error: 'no key' }), { status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
-                        let tmdbUrl;
-                        if (q.tmdb_season) tmdbUrl = `https://api.themoviedb.org/3/tv/${q.id}/season/${q.s}?api_key=${k}`;
-                        else if (q.tmdb_movie) {
-                            const append = q.append_to_response ? `&append_to_response=${q.append_to_response}` : '';
-                            tmdbUrl = `https://api.themoviedb.org/3/movie/${q.id}?api_key=${k}${append}`;
-                        } else tmdbUrl = `https://api.themoviedb.org/3/tv/${q.id}?api_key=${k}`;
-                        const r = await fetch(tmdbUrl);
-                        const d = await r.json();
-                        return new Response(JSON.stringify(d), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
-                    } catch (err) {
-                        return new Response(JSON.stringify({ error: err.message }), { status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
-                    }
-                }
                 
                 if (q.tt) {
-                    const upstream = await fetch(proxyUrl, {
-                        headers: { ...clientHeaders, 'User-Agent': getUA() }
-                    });
+                    const upstream = await fetchUpstream(rawUrl);
                     const buf = await upstream.arrayBuffer();
                     const full = new Uint8Array(buf);
                     const stripped = full[0] === 0x89 ? full.slice(120) : full;
@@ -422,24 +393,42 @@ export async function onRequest({ request, env }) {
                     if (hostOverride) {
                         try { extraHeaders['Host'] = new URL(hostOverride).host; } catch { }
                     }
-                    
-                    // Forward request to proxy with headers
-                    const upstream = await fetch(proxyUrl, {
-                        headers: { ...clientHeaders, ...extraHeaders, 'User-Agent': getUA() }
+
+                    const looksLikeM3u8 = /\.m3u8?(\?|$)/i.test(rawUrl) || rawUrl.includes('/playlist/');
+                    if (looksLikeM3u8) {
+                        const upstream = await fetchUpstream(rawUrl, 0, extraHeaders);
+                        const text = await upstream.text();
+                        if (text.trim().startsWith('#EXTM3U')) {
+                            const rewritten = rewriteM3u8(text, rawUrl, `&${cfg.proxyParam}=1`, reqUrl.origin);
+                            return new Response(rewritten, { headers: { 'Content-Type': 'application/vnd.apple.mpegurl', 'Access-Control-Allow-Origin': '*' } });
+                        }
+                        const ct2 = (upstream.headers.get('content-type') || 'application/octet-stream').toLowerCase();
+                        return new Response(text, { headers: { 'Content-Type': ct2, 'Access-Control-Allow-Origin': '*' } });
+                    }
+                    const upstream = await fetch(rawUrl, {
+                        headers: { 'User-Agent': getUA(), ...extraHeaders },
+                        redirect: 'follow',
                     });
-                    return upstream;
+                    const ct = (upstream.headers.get('content-type') || '').toLowerCase();
+                    if (ct.includes('mpegurl') || ct.includes('m3u8')) {
+                        const text = await upstream.text();
+                        const rewritten = rewriteM3u8(text, rawUrl, `&${cfg.proxyParam}=1`, reqUrl.origin);
+                        return new Response(rewritten, { headers: { 'Content-Type': 'application/vnd.apple.mpegurl', 'Access-Control-Allow-Origin': '*' } });
+                    }
+                    return new Response(upstream.body, { headers: { 'Content-Type': ct || 'video/MP2T', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'public, max-age=3600' } });
                 }
                 
-                // Fallback: forward general proxy requests with headers
-                const upstream = await fetch(proxyUrl, {
-                    headers: { ...clientHeaders, 'User-Agent': getUA() }
-                });
-                return upstream;
-            } catch (err) {
-                return new Response(JSON.stringify({ error: err.message }), { status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+                const upstream = await fetchUpstream(rawUrl);
+                const ct = (upstream.headers.get('content-type') || '').toLowerCase();
+                const isM3u8 = ct.includes('mpegurl') || ct.includes('m3u8') || /\.m3u8?(\?|$)/i.test(rawUrl);
+                if (isM3u8) {
+                    const text = await upstream.text();
+                    return new Response(rewriteM3u8(text, rawUrl), { headers: { 'Content-Type': 'application/vnd.apple.mpegurl', 'Access-Control-Allow-Origin': '*' } });
+                }
+                return new Response(upstream.body, { headers: { 'Content-Type': ct || 'video/MP2T', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'public, max-age=3600' } });
+            } catch (e) {
+                return new Response(e.message, { status: 502, headers: corsHeaders });
             }
-
-            return new Response(JSON.stringify({ error: 'missing parameters' }), { status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
         }
 
         return new Response(JSON.stringify({ error: 'missing parameters' }), { status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
