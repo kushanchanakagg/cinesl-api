@@ -13,257 +13,173 @@ import * as vixsrc from '../../sources/vixsrc.js';
 
 import { getDownloads as get02movieDownloads } from '../../sources/02movie.js';
 
-/* =======================
-   🔥 YOUR PHP PROXY
-======================= */
-const PHP_PROXY = 'https://cdn.cinesl.top/proxy.php';
-
 const ALL_SOURCE_MODULES = {
-    vidzee, vidnest, vidsrc, vidrock, videasy,
-    cinesu, peachify, lookmovie, vidlink, vixsrc
+  vidzee, vidnest, vidsrc, vidrock, videasy,
+  cinesu, peachify, lookmovie, vidlink, vixsrc
 };
 
 const SOURCE_MODULES = Object.fromEntries(
-    Object.entries(ALL_SOURCE_MODULES).filter(([key]) => {
-        const cfg = SOURCE_MAP[key];
-        return cfg && !cfg.disabled;
-    })
+  Object.entries(ALL_SOURCE_MODULES).filter(([key]) => {
+    const cfg = SOURCE_MAP[key];
+    return cfg && !cfg.disabled;
+  })
 );
+
+// 🔥 PHP PROXY BASE (CHANGE THIS)
+const PHP_PROXY = "https://cdn.cinesl.top/proxy.php";
 
 const SUBTITLE_BASE = 'https://sub.vdrk.site/v1';
 
-/* =======================
-   USER AGENTS
-======================= */
 const UA_LIST = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)',
-    'Mozilla/5.0 (X11; Linux x86_64) Gecko Firefox/125.0'
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Safari/605.1.15',
+  'Mozilla/5.0 (X11; Linux x86_64) Firefox/125.0',
 ];
 
 const getUA = () => UA_LIST[Math.floor(Math.random() * UA_LIST.length)];
 
-/* =======================
-   CACHE
-======================= */
 const cache = new Map();
 
 function getCached(key, fn) {
-    const hit = cache.get(key);
-    if (hit && Date.now() - hit.ts < CACHE_TTL) return Promise.resolve(hit.val);
-    return fn().then(val => {
-        if (val) cache.set(key, { val, ts: Date.now() });
-        return val;
-    });
+  const hit = cache.get(key);
+  if (hit && Date.now() - hit.ts < CACHE_TTL) return Promise.resolve(hit.val);
+  return fn().then(val => {
+    if (val) cache.set(key, { val, ts: Date.now() });
+    return val;
+  });
 }
 
-/* =======================
-   UTILS
-======================= */
-const delay = ms => new Promise(r => setTimeout(r, ms));
+const jitter = (ms) => new Promise(r => setTimeout(r, Math.random() * ms));
+
+async function withRetry(fn, attempts = 3, delay = 1000) {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const r = await fn();
+      if (r) return r;
+    } catch {}
+    await new Promise(r => setTimeout(r, delay * (i + 1)));
+  }
+  return null;
+}
 
 function withTimeout(p, ms) {
-    return Promise.race([
-        p,
-        new Promise(r => setTimeout(() => r(null), ms))
-    ]);
+  return Promise.race([
+    p,
+    new Promise(res => setTimeout(() => res(null), ms))
+  ]);
 }
 
-/* =======================
-   FIXED PHP PROXY WRAPPER
-======================= */
-const proxy = (url, extra = '') =>
-    `${PHP_PROXY}?url=${encodeURIComponent(url)}${extra}`;
+async function fetchUpstream(url, redirects = 0) {
+  if (redirects > 5) throw new Error("redirect loop");
 
-/* =======================
-   M3U8 REWRITE FIXED
-======================= */
-function rewriteM3u8(body, url, extraParam = '') {
-    const base = url.split('?')[0];
-    const dir = base.slice(0, base.lastIndexOf('/') + 1);
-    const origin = new URL(url).origin;
+  const res = await fetch(url, {
+    headers: { 'User-Agent': getUA() },
+    redirect: 'manual'
+  });
 
-    return body.split('\n').map(line => {
-        const t = line.trim();
-        if (!t) return line;
+  if (res.status >= 300 && res.status < 400 && res.headers.get('location')) {
+    const next = new URL(res.headers.get('location'), url).href;
+    return fetchUpstream(next, redirects + 1);
+  }
 
-        if (t.startsWith('#')) {
-            return t.replace(/URI="([^"]+)"/g, (m, uri) => {
-                const abs =
-                    uri.startsWith('http') ? uri :
-                    uri.startsWith('/') ? origin + uri :
-                    dir + uri;
-
-                if (abs.includes('tiktokcdn.com')) return `URI="${abs}"`;
-
-                return `URI="${proxy(abs, extraParam)}"`;
-            });
-        }
-
-        const abs =
-            t.startsWith('http') ? t :
-            t.startsWith('/') ? origin + t :
-            dir + t;
-
-        return proxy(abs, extraParam);
-    }).join('\n');
+  return res;
 }
 
-/* =======================
-   FETCH UPSTREAM SOURCE
-======================= */
-async function fetchSource(cfg, id, s, e, env) {
-    const mod = SOURCE_MODULES[cfg.key];
-    const tmdbKey = env?.TMDB_API_KEY;
+// 🔥 REPLACED: Cloudflare proxy → PHP proxy
+function wrapUrl(rawUrl, sourceKey) {
+  if (!rawUrl) return null;
+  const url = typeof rawUrl === 'object' ? rawUrl.url : rawUrl;
 
+  const cfg = SOURCE_MAP[sourceKey];
+  if (!cfg || cfg.skipProxy) return url;
+
+  return `${PHP_PROXY}?url=${encodeURIComponent(url)}&source=${sourceKey}`;
+}
+
+// -------- STREAM FETCH ----------
+function fetchSource(cfg, cacheKey, id, s, e, env = null) {
+  const mod = SOURCE_MODULES[cfg.key];
+  const tmdbKey = cfg.key === 'lookmovie' ? env?.TMDB_API_KEY : null;
+
+  if (cfg.multiBase) {
     return withTimeout(
-        getCached(`${cfg.key}-${id}-${s}-${e}`, async () => {
-            if (cfg.multiBase) {
-                for (const base of mod.BASES) {
-                    const r = await mod.getStream(id, s, e, base);
-                    if (r) return r;
-                }
-                return null;
-            }
-            return mod.getStream(id, s, e, tmdbKey);
-        }),
-        cfg.timeout
-    );
-}
-
-/* =======================
-   WRAP URL
-======================= */
-function wrapUrl(url, key) {
-    if (!url) return null;
-    const raw = typeof url === 'object' ? url.url : url;
-    const cfg = SOURCE_MAP[key];
-    if (!cfg || cfg.skipProxy) return raw;
-
-    return proxy(raw, `&${cfg.proxyParam}=1`);
-}
-
-/* =======================
-   VERIFY STREAM
-======================= */
-async function verifyStream(url, key) {
-    const mod = SOURCE_MODULES[key];
-    if (!mod.VERIFY_HEADERS) return true;
-
-    try {
-        const res = await fetch(url, {
-            headers: { 'User-Agent': getUA(), ...mod.VERIFY_HEADERS }
-        });
-
-        if (!res.ok) return false;
-        const txt = await res.text();
-        return txt.startsWith('#EXTM3U');
-    } catch {
-        return false;
-    }
-}
-
-/* =======================
-   GET SOURCES
-======================= */
-async function getAllWorkingSources(id, s, e, env) {
-    const results = await Promise.all(
-        SOURCES.filter(c => !c.disabled).map(async cfg => {
-            try {
-                const raw = await fetchSource(cfg, id, s, e, env);
-                if (!raw) return null;
-
-                const ok = await verifyStream(raw.url || raw, cfg.key);
-                if (!ok) return null;
-
-                return {
-                    source: cfg.key,
-                    label: cfg.label,
-                    url: wrapUrl(raw, cfg.key)
-                };
-            } catch {
-                return null;
-            }
-        })
-    );
-
-    return results.filter(Boolean);
-}
-
-/* =======================
-   SUBTITLES
-======================= */
-async function fetchSubtitles(url) {
-    try {
-        const r = await fetch(url, { headers: { 'User-Agent': getUA() } });
-        if (!r.ok) return null;
-        return await r.json();
-    } catch {
-        return null;
-    }
-}
-
-/* =======================
-   MAIN ROUTER
-======================= */
-export async function onRequest({ request, env }) {
-    const url = new URL(request.url);
-    const path = url.pathname;
-    const q = Object.fromEntries(url.searchParams);
-
-    const cors = {
-        'Access-Control-Allow-Origin': '*',
-        'Content-Type': 'application/json'
-    };
-
-    /* =======================
-       MOVIE
-    ======================= */
-    if (path === '/api/movie') {
-        const sources = await getAllWorkingSources(q.id, null, null, env);
-        const subtitles = await fetchSubtitles(`${SUBTITLE_BASE}/movie/${q.id}`);
-
-        return new Response(JSON.stringify({ sources, subtitles }), { headers: cors });
-    }
-
-    /* =======================
-       TV
-    ======================= */
-    if (path === '/api/tv') {
-        const sources = await getAllWorkingSources(q.id, q.season, q.episode, env);
-        const subtitles = await fetchSubtitles(`${SUBTITLE_BASE}/tv/${q.id}/${q.season}/${q.episode}`);
-
-        return new Response(JSON.stringify({ sources, subtitles }), { headers: cors });
-    }
-
-    /* =======================
-       MAIN PROXY (FIXED)
-    ======================= */
-    if (q.url) {
-        const raw = decodeURIComponent(q.url);
-        const proxyUrl = proxy(raw, q.tt ? '&tt=1' : '');
-
-        const r = await fetch(proxyUrl);
-        const ct = r.headers.get('content-type') || '';
-
-        if (ct.includes('mpegurl') || raw.includes('.m3u8')) {
-            const text = await r.text();
-            return new Response(rewriteM3u8(text, raw), {
-                headers: {
-                    'Content-Type': 'application/vnd.apple.mpegurl',
-                    ...cors
-                }
-            });
+      jitter(cfg.jitter).then(async () => {
+        for (const base of mod.BASES) {
+          const key = `${cfg.key}-${base}-${cacheKey}`;
+          const r = await getCached(key, () =>
+            withRetry(() => mod.getStream(id, s, e, base), cfg.retries)
+          );
+          if (r) return r;
         }
+        return null;
+      }),
+      cfg.timeout
+    );
+  }
 
-        return new Response(r.body, { headers: cors });
-    }
+  return withTimeout(
+    jitter(cfg.jitter).then(() =>
+      getCached(`${cfg.key}-${cacheKey}`, () =>
+        withRetry(() => mod.getStream(id, s, e, tmdbKey), cfg.retries)
+      )
+    ),
+    cfg.timeout
+  );
+}
 
-    /* =======================
-       FALLBACK (NOW FIXED)
-    ======================= */
-    return new Response(JSON.stringify({
-        error: 'invalid route',
-        available: ['/api/movie', '/api/tv', '/api?url=']
-    }), { status: 404, headers: cors });
+// -------- ALL SOURCES ----------
+async function getAllWorkingSources(id, s, e, env = null) {
+  const cacheKey = `${id}-${s || ''}-${e || ''}`;
+
+  const fetched = await Promise.all(
+    SOURCES.filter(c => !c.disabled).map(cfg =>
+      fetchSource(cfg, cacheKey, id, s, e, env)
+        .then(r => ({ raw: r, source: cfg.key }))
+        .catch(() => ({ raw: null, source: cfg.key }))
+    )
+  );
+
+  const valid = fetched.filter(x => x.raw);
+
+  return valid.map(c => {
+    const cfg = SOURCE_MAP[c.source];
+
+    return {
+      source: c.source,
+      label: cfg?.label || c.source,
+      url: wrapUrl(c.raw, c.source)
+    };
+  });
+}
+
+// -------- MAIN API ----------
+export async function onRequest({ request, env }) {
+  const url = new URL(request.url);
+  const q = Object.fromEntries(url.searchParams);
+
+  const cors = {
+    "Access-Control-Allow-Origin": "*",
+    "Content-Type": "application/json"
+  };
+
+  if (url.pathname === "/api/movie") {
+    const { id } = q;
+    if (!id) return new Response(JSON.stringify({ error: "missing id" }), { status: 400, headers: cors });
+
+    const sources = await getAllWorkingSources(id, null, null, env);
+
+    if (!sources.length)
+      return new Response(JSON.stringify({ error: "no sources" }), { status: 502, headers: cors });
+
+    return new Response(JSON.stringify({ sources }, null, 2), { headers: cors });
+  }
+
+  if (url.pathname === "/api/tv") {
+    const { id, season, episode } = q;
+    const sources = await getAllWorkingSources(id, season, episode, env);
+
+    return new Response(JSON.stringify({ sources }, null, 2), { headers: cors });
+  }
+
+  return new Response(JSON.stringify({ error: "not found" }), { status: 404, headers: cors });
 }
