@@ -14,7 +14,6 @@ import * as vixsrc from '../../sources/vixsrc.js';
 import { getDownloads as get02movieDownloads } from '../../sources/02movie.js';
 
 const ALL_SOURCE_MODULES = { vidzee, vidnest, vidsrc, vidrock, videasy, cinesu, peachify, lookmovie, vidlink, vixsrc };
-
 const SOURCE_MODULES = Object.fromEntries(
     Object.entries(ALL_SOURCE_MODULES).filter(([key]) => {
         const sourceConfig = SOURCE_MAP[key];
@@ -22,16 +21,13 @@ const SOURCE_MODULES = Object.fromEntries(
     })
 );
 
-const PROXY = "https://cdn.cinesl.top/proxy.php";
-
-// ---------------- KEEP YOUR ORIGINAL FUNCTIONS ----------------
-
 const SUBTITLE_BASE = 'https://sub.vdrk.site/v1';
 
 const UA_LIST = [
-    'Mozilla/5.0 Chrome/124.0 Safari/537.36',
-    'Mozilla/5.0 Firefox/125.0',
-    'Mozilla/5.0 Safari/605.1.15',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15',
+    'Mozilla/5.0 (X11; Linux x86_64; rv:125.0) Gecko/20100101 Firefox/125.0',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0',
 ];
 
 const getUA = () => UA_LIST[Math.floor(Math.random() * UA_LIST.length)];
@@ -54,8 +50,10 @@ async function withRetry(fn, attempts = 3, delay = 1000) {
         try {
             const result = await fn();
             if (result) return result;
-        } catch {}
-        await new Promise(r => setTimeout(r, delay * (i + 1)));
+        } catch {
+            if (i === attempts - 1) return null;
+            await new Promise(r => setTimeout(r, delay * (i + 1)));
+        }
     }
     return null;
 }
@@ -80,31 +78,35 @@ async function fetchUpstream(url, redirects = 0, extraHeaders = {}) {
     return res;
 }
 
-// ---------------- ONLY FIXED PART ----------------
-function wrapUrl(rawUrl, sourceKey) {
-    if (!rawUrl) return null;
-
-    const raw = typeof rawUrl === 'object' ? rawUrl.url : rawUrl;
-    const cfg = SOURCE_MAP[sourceKey];
-
-    if (!cfg || cfg.skipProxy) return raw;
-
-    return `${PROXY}?url=${encodeURIComponent(raw)}`;
+function rewriteM3u8(body, url, extraParam = '') {
+    const base = url.split('?')[0];
+    const dir = base.slice(0, base.lastIndexOf('/') + 1);
+    const origin = new URL(url).origin;
+    return body.split('\n').map(line => {
+        const t = line.trim();
+        if (!t) return line;
+        if (t.startsWith('#')) {
+            return t.replace(/URI="([^"]+)"/g, (match, uri) => {
+                const abs = uri.startsWith('http') ? uri : uri.startsWith('/') ? origin + uri : dir + uri;
+                if (abs.includes('tiktokcdn.com')) return `URI="${abs}"`;
+                return `URI="https://cdn.cinesl.top/proxy.php?url=${encodeURIComponent(abs)}${extraParam}"`;
+            });
+        }
+        const abs = t.startsWith('http') ? t : t.startsWith('/') ? origin + t : dir + t;
+        if (abs.includes('tiktokcdn.com') || abs.includes('p16-sg') || abs.includes('p19-sg')) return `https://cdn.cinesl.top/proxy.php?url=${encodeURIComponent(abs)}&tt=1`;
+        return `https://cdn.cinesl.top/proxy.php?url=${encodeURIComponent(abs)}${extraParam}`;
+    }).join('\n');
 }
 
-// ---------------- YOUR ORIGINAL FUNCTIONS (UNCHANGED) ----------------
 function fetchSource(cfg, cacheKey, id, s, e, clientIP = null, env = null) {
     const mod = SOURCE_MODULES[cfg.key];
     const tmdbKey = cfg.key === 'lookmovie' ? env?.TMDB_API_KEY : null;
-
     if (cfg.multiBase) {
         return withTimeout(
             jitter(cfg.jitter).then(async () => {
                 for (const base of mod.BASES) {
                     const key = `${cfg.key}-${base}-${cacheKey}`;
-                    const result = await getCached(key, () =>
-                        withRetry(() => mod.getStream(id, s, e, base, clientIP), cfg.retries, 500)
-                    ).catch(() => null);
+                    const result = await getCached(key, () => withRetry(() => mod.getStream(id, s, e, base, clientIP), cfg.retries, 500)).catch(() => null);
                     if (result) return result;
                 }
                 return null;
@@ -112,20 +114,40 @@ function fetchSource(cfg, cacheKey, id, s, e, clientIP = null, env = null) {
             cfg.timeout
         );
     }
-
     return withTimeout(
         jitter(cfg.jitter).then(() =>
-            getCached(`${cfg.key}-${cacheKey}`, () =>
-                withRetry(() => mod.getStream(id, s, e, tmdbKey, clientIP), cfg.retries, 1000)
-            ).catch(() => null)
+            getCached(`${cfg.key}-${cacheKey}`, () => withRetry(() => mod.getStream(id, s, e, tmdbKey, clientIP), cfg.retries, 1000)).catch(() => null)
         ),
         cfg.timeout
     );
 }
 
+function wrapUrl(rawUrl, sourceKey) {
+    if (!rawUrl) return null;
+    const raw = typeof rawUrl === 'object' ? rawUrl.url : rawUrl;
+    const cfg = SOURCE_MAP[sourceKey];
+    if (!cfg || cfg.skipProxy) return raw;
+    return `https://cdn.cinesl.top/proxy.php?url=${encodeURIComponent(raw)}&${cfg.proxyParam}=1`;
+}
+
+async function verifyStream(rawUrl, sourceKey) {
+    const mod = SOURCE_MODULES[sourceKey];
+    if (!mod.VERIFY_HEADERS) return true;
+    try {
+        const res = await Promise.race([
+            fetchUpstream(rawUrl, 0, { 'User-Agent': getUA(), ...mod.VERIFY_HEADERS }),
+            new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 8000))
+        ]);
+        if (res.status >= 400) return false;
+        const text = await res.text();
+        return text.trim().startsWith('#EXTM3U');
+    } catch {
+        return false;
+    }
+}
+
 async function getAllWorkingSources(id, s, e, clientIP = null, env = null) {
     const cacheKey = `${id}-${s || ''}-${e || ''}`;
-
     const fetched = await Promise.all(
         SOURCES.filter(cfg => !cfg.disabled).map(cfg =>
             fetchSource(cfg, cacheKey, id, s, e, clientIP, env)
@@ -133,86 +155,304 @@ async function getAllWorkingSources(id, s, e, clientIP = null, env = null) {
                 .catch(() => ({ raw: null, source: cfg.key }))
         )
     );
-
     const candidates = fetched.filter(c => c.raw);
-
     const verified = await Promise.all(
         candidates.map(async c => {
             const raw = typeof c.raw === 'object' ? c.raw.url : c.raw;
-
+            const ok = await verifyStream(raw, c.source);
+            if (!ok) return null;
             const cfg = SOURCE_MAP[c.source];
-
             return {
                 source: c.source,
                 label: cfg?.label ?? c.source,
-                url: wrapUrl(raw, c.source),
+                url: wrapUrl(c.raw, c.source),
             };
         })
     );
-
     return verified.filter(Boolean);
 }
 
-// ---------------- MAIN API ----------------
-export async function onRequest({ request, env }) {
-    const clientIP = request.headers.get('CF-Connecting-IP') || null;
-
-    const url = new URL(request.url);
-    const q = Object.fromEntries(url.searchParams);
-
-    const cors = {
-        "Access-Control-Allow-Origin": "*",
-        "Content-Type": "application/json"
-    };
-
-    // ---------------- MOVIE ----------------
-    if (url.pathname === "/api/movie") {
-        const sources = await getAllWorkingSources(q.id, null, null, clientIP, env);
-        return new Response(JSON.stringify({ sources }, null, 2), { headers: cors });
+async function getMetadata(id, s, e, env) {
+    try {
+        const k = env.TMDB_API_KEY;
+        if (!k) return null;
+        const url = s
+            ? `https://api.themoviedb.org/3/tv/${id}/season/${s}/episode/${e || 1}?api_key=${k}`
+            : `https://api.themoviedb.org/3/movie/${id}?api_key=${k}`;
+        const res = await fetch(url);
+        if (!res.ok) return null;
+        return await res.json();
+    } catch {
+        return null;
     }
+}
 
-    // ---------------- TV ----------------
-    if (url.pathname === "/api/tv") {
-        const sources = await getAllWorkingSources(q.id, q.season, q.episode, clientIP, env);
-        return new Response(JSON.stringify({ sources }, null, 2), { headers: cors });
+async function fetchSubtitles(subtitleUrl) {
+    try {
+        const res = await fetch(subtitleUrl, { headers: { 'User-Agent': getUA() } });
+        if (!res.ok) return null;
+        return await res.json();
+    } catch {
+        return null;
     }
+}
 
-    // ---------------- PROXY FIX (IMPORTANT PART ONLY) ----------------
-    if (url.pathname === "/api") {
-        if (q.url || q.proxy) {
-            const rawUrl = decodeURIComponent(q.url || q.proxy);
-
-            const forwardHeaders = {
-                "User-Agent": request.headers.get("user-agent") || getUA(),
-                "Referer": request.headers.get("referer") || "",
-                "Origin": request.headers.get("origin") || "",
-                "Range": request.headers.get("range") || ""
-            };
-
-            const proxyUrl = `${PROXY}?url=${encodeURIComponent(rawUrl)}`;
-
-            const res = await fetch(proxyUrl, {
-                headers: forwardHeaders
-            });
-
-            const type = res.headers.get("content-type") || "";
-
-            return new Response(res.body, {
-                headers: {
-                    "Content-Type": type,
-                    "Access-Control-Allow-Origin": "*"
+async function handleHealth(env) {
+    const results = await Promise.allSettled(
+        SOURCES.filter(cfg => !cfg.disabled).map(cfg => (async () => {
+            const t = Date.now();
+            const mod = SOURCE_MODULES[cfg.key];
+            let url = null;
+            if (cfg.multiBase) {
+                for (const base of mod.BASES) {
+                    url = await withTimeout(withRetry(() => mod.getStream(HEALTH_PROBE_ID, null, null, base), 2, 500), cfg.timeout).catch(() => null);
+                    if (url) break;
                 }
-            });
+            } else {
+                url = await withTimeout(withRetry(() => mod.getStream(HEALTH_PROBE_ID, null, null), cfg.retries, 1000), cfg.timeout).catch(() => null);
+            }
+            return { ok: !!url, ms: Date.now() - t };
+        })())
+    );
+
+    function unwrap(r) {
+        return r.status === 'fulfilled' ? r.value : { ok: false, ms: null, error: r.reason?.message };
+    }
+
+    const enabledSources = SOURCES.filter(cfg => !cfg.disabled);
+    const byKey = Object.fromEntries(enabledSources.map((cfg, i) => [cfg.key, unwrap(results[i])]));
+
+    const allOk = Object.values(byKey).every(v => v.ok);
+
+    return new Response(JSON.stringify({
+        status: allOk ? 'ok' : 'degraded',
+        timestamp: new Date().toISOString(),
+        tmdb: !!env.TMDB_API_KEY,
+        cache: cache.size,
+        probe_id: HEALTH_PROBE_ID,
+        sources: byKey,
+    }, null, 2), {
+        status: allOk ? 200 : 207,
+        headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+    });
+}
+
+async function handleTestSource(sourceKey, id, s, e, clientIP = null, env = null) {
+    const start = Date.now();
+    const cacheKey = `${id}-${s || ''}-${e || ''}`;
+    const cfg = SOURCE_MAP[sourceKey];
+
+    if (cfg.disabled) {
+        return new Response(JSON.stringify({
+            source: sourceKey,
+            id,
+            s: s || null,
+            e: e || null,
+            ok: false,
+            url: null,
+            raw_url: null,
+            elapsed_ms: Date.now() - start,
+            error: 'source disabled',
+        }, null, 2), { headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' } });
+    }
+    let rawUrl = null;
+    let error = null;
+    try {
+        rawUrl = await fetchSource(cfg, cacheKey, id, s, e, clientIP, env);
+    } catch (err) {
+        error = err.message;
+    }
+    const elapsed = Date.now() - start;
+    const raw = rawUrl ? (typeof rawUrl === 'object' ? rawUrl.url : rawUrl) : null;
+    return new Response(JSON.stringify({
+        source: sourceKey,
+        id,
+        s: s || null,
+        e: e || null,
+        ok: !!raw,
+        url: wrapUrl(raw, sourceKey),
+        raw_url: raw,
+        elapsed_ms: elapsed,
+        error: error || (raw ? null : 'no stream returned'),
+    }, null, 2), { headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' } });
+}
+
+export async function onRequest({ request, env }) {
+    const clientIP = request.headers.get('CF-Connecting-IP') || request.headers.get('X-Forwarded-For') || null;
+    const origin = request.headers.get('origin') || '';
+    const corsHeaders = ALLOWED_ORIGINS.includes(origin)
+        ? { 'Access-Control-Allow-Origin': origin, 'Access-Control-Allow-Credentials': 'true' }
+        : { 'Access-Control-Allow-Origin': '*' };
+    corsHeaders['Content-Security-Policy'] = `frame-ancestors 'self' ${ALLOWED_ORIGINS.join(' ')}`;
+
+    if (request.method === 'OPTIONS') {
+        return new Response(null, { status: 204, headers: { ...corsHeaders, 'Access-Control-Allow-Methods': 'GET,OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type' } });
+    }
+
+    const reqUrl = new URL(request.url);
+    const { pathname, searchParams } = reqUrl;
+    const q = Object.fromEntries(searchParams);
+
+    if (pathname === '/api/health') {
+        return handleHealth(env);
+    }
+
+    if (pathname === '/api/movie') {
+        const { id } = q;
+        if (!id) return new Response(JSON.stringify({ error: 'missing id' }), { status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+        try {
+            const [sources, meta, subtitles] = await Promise.all([
+                getAllWorkingSources(id, null, null, clientIP, env),
+                getMetadata(id, null, null, env),
+                fetchSubtitles(`${SUBTITLE_BASE}/movie/${id}`),
+            ]);
+            if (!sources.length) return new Response(JSON.stringify({ error: 'no working sources found' }), { status: 502, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+            return new Response(JSON.stringify({ sources, subtitles: subtitles || [], meta }, null, 2), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+        } catch (e) {
+            return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+        }
+    }
+
+    if (pathname === '/api/tv') {
+        const { id, season: s, episode: e } = q;
+        if (!id || !s || !e) return new Response(JSON.stringify({ error: 'missing id, season, or episode' }), { status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+        try {
+            const [sources, meta, subtitles] = await Promise.all([
+                getAllWorkingSources(id, s, e, clientIP, env),
+                getMetadata(id, s, e, env),
+                fetchSubtitles(`${SUBTITLE_BASE}/tv/${id}/${s}/${e}`),
+            ]);
+            if (!sources.length) return new Response(JSON.stringify({ error: 'no working sources found' }), { status: 502, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+            return new Response(JSON.stringify({ sources, subtitles: subtitles || [], meta }, null, 2), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+        } catch (e) {
+            return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+        }
+    }
+
+    const subtitleMovieMatch = pathname.match(/^\/api\/subtitles\/movie\/([^/]+)$/);
+    if (subtitleMovieMatch) {
+        const id = subtitleMovieMatch[1];
+        try {
+            const subtitles = await fetchSubtitles(`${SUBTITLE_BASE}/movie/${id}`);
+            if (!subtitles) return new Response(JSON.stringify({ error: 'no subtitles found' }), { status: 404, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+            return new Response(JSON.stringify(subtitles, null, 2), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+        } catch (e) {
+            return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+        }
+    }
+
+    const subtitleTvMatch = pathname.match(/^\/api\/subtitles\/tv\/([^/]+)\/([^/]+)\/([^/]+)$/);
+    if (subtitleTvMatch) {
+        const [, id, season, episode] = subtitleTvMatch;
+        try {
+            const subtitles = await fetchSubtitles(`${SUBTITLE_BASE}/tv/${id}/${season}/${episode}`);
+            if (!subtitles) return new Response(JSON.stringify({ error: 'no subtitles found' }), { status: 404, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+            return new Response(JSON.stringify(subtitles, null, 2), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+        } catch (e) {
+            return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+        }
+    }
+
+    const testMatch = pathname.match(/^\/api\/test\/([^/]+)$/);
+    if (testMatch) {
+        const id = testMatch[1];
+        const source = q.source;
+        const s = q.season || q.s || null;
+        const e = q.episode || q.e || null;
+        if (!source || !SOURCE_MAP[source]) {
+            return new Response(JSON.stringify({ error: 'invalid or missing source' }), { status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+        }
+        return handleTestSource(source, id, s, e, clientIP, env);
+    }
+
+    if (pathname === '/api' || pathname === '/api/') {
+        if (q.url || q.proxy) {
+            try {
+                const rawUrl = decodeURIComponent(q.url || q.proxy);
+                // Forward client headers to PHP proxy
+                const proxyUrl = `https://cdn.cinesl.top/proxy.php?url=${encodeURIComponent(rawUrl)}${q.tt ? '&tt=1' : ''}`;
+                // Get client headers to forward
+                const clientHeaders = {};
+                for (const [key, value] of request.headers.entries()) {
+                    if (key.startsWith('accept') || key.startsWith('user-agent') || key.startsWith('referer') || key.startsWith('origin')) {
+                        clientHeaders[key] = value;
+                    }
+                }
+                if (q.tt) {
+                    const upstream = await fetch(proxyUrl, {
+                        headers: { ...clientHeaders, 'User-Agent': getUA() }
+                    });
+                    const buf = await upstream.arrayBuffer();
+                    const full = new Uint8Array(buf);
+                    const stripped = full[0] === 0x89 ? full.slice(120) : full;
+                    return new Response(stripped, { headers: { 'Content-Type': 'video/MP2T', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'public, max-age=3600' } });
+                }
+                const matchedSource = SOURCES.find(cfg => q[cfg.proxyParam]);
+                if (matchedSource) {
+                    const mod = SOURCE_MODULES[matchedSource.key];
+                    const cfg = SOURCE_MAP[matchedSource.key];
+                    let extraHeaders = { ...(mod.VERIFY_HEADERS || {}) };
+
+                    const parsedRaw = new URL(rawUrl);
+                    const embeddedHeaders = parsedRaw.searchParams.get('headers');
+                    const hostOverride = parsedRaw.searchParams.get('host');
+                    if (embeddedHeaders) {
+                        try { Object.assign(extraHeaders, JSON.parse(embeddedHeaders)); } catch { }
+                    }
+                    if (hostOverride) {
+                        try { extraHeaders['Host'] = new URL(hostOverride).host; } catch { }
+                    }
+                }
+                if (q.tmdb_movie || q.tmdb_tv || q.tmdb_show || q.tmdb_season) {
+                    try {
+                        const k = env.TMDB_API_KEY;
+                        if (!k) return new Response(JSON.stringify({ error: 'no key' }), { status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+                        let tmdbUrl;
+                        if (q.tmdb_season) tmdbUrl = `https://api.themoviedb.org/3/tv/${q.id}/season/${q.s}?api_key=${k}`;
+                        else if (q.tmdb_movie) {
+                            const append = q.append_to_response ? `&append_to_response=${q.append_to_response}` : '';
+                            tmdbUrl = `https://api.themoviedb.org/3/movie/${q.id}?api_key=${k}${append}`;
+                        } else tmdbUrl = `https://api.themoviedb.org/3/tv/${q.id}?api_key=${k}`;
+                        const r = await fetch(tmdbUrl);
+                        const d = await r.json();
+                        return new Response(JSON.stringify(d), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+                    } catch (err) {
+                        return new Response(JSON.stringify({ error: err.message }), { status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+                    }
+                }
+            } catch (err) {
+                return new Response(JSON.stringify({ error: err.message }), { status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+            }
+
+            return new Response(JSON.stringify({ error: 'missing parameters' }), { status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
         }
 
-        return new Response(JSON.stringify({ error: "missing url" }), {
-            status: 400,
-            headers: cors
-        });
+        return new Response(JSON.stringify({ error: 'missing parameters' }), { status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
     }
 
-    return new Response(JSON.stringify({ error: "not found" }), {
-        status: 404,
-        headers: cors
-    });
+    const downloadsMovieMatch = pathname.match(/^\/api\/downloads\/movie\/([^/]+)$/);
+    if (downloadsMovieMatch) {
+        const id = downloadsMovieMatch[1];
+        try {
+            const downloads = await get02movieDownloads(id, null, null);
+            if (!downloads) return new Response(JSON.stringify({ error: 'no downloads found' }), { status: 404, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+            return new Response(JSON.stringify({ downloads }, null, 2), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+        } catch (e) {
+            return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+        }
+    }
+
+    const downloadsTvMatch = pathname.match(/^\/api\/downloads\/tv\/([^/]+)\/([^/]+)\/([^/]+)$/);
+    if (downloadsTvMatch) {
+        const [, id, season, episode] = downloadsTvMatch;
+        try {
+            const downloads = await get02movieDownloads(id, season, episode);
+            if (!downloads) return new Response(JSON.stringify({ error: 'no downloads found' }), { status: 404, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+            return new Response(JSON.stringify({ downloads }, null, 2), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+        } catch (e) {
+            return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+        }
+    }
+
+    return new Response(JSON.stringify({ error: 'not found' }), { status: 404, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
 }
