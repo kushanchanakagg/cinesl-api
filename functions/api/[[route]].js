@@ -378,31 +378,7 @@ export async function onRequest({ request, env }) {
                         clientHeaders[key] = value;
                     }
                 }
-                if (q.tt) {
-                    const upstream = await fetch(proxyUrl, {
-                        headers: { ...clientHeaders, 'User-Agent': getUA() }
-                    });
-                    const buf = await upstream.arrayBuffer();
-                    const full = new Uint8Array(buf);
-                    const stripped = full[0] === 0x89 ? full.slice(120) : full;
-                    return new Response(stripped, { headers: { 'Content-Type': 'video/MP2T', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'public, max-age=3600' } });
-                }
-                const matchedSource = SOURCES.find(cfg => q[cfg.proxyParam]);
-                if (matchedSource) {
-                    const mod = SOURCE_MODULES[matchedSource.key];
-                    const cfg = SOURCE_MAP[matchedSource.key];
-                    let extraHeaders = { ...(mod.VERIFY_HEADERS || {}) };
-
-                    const parsedRaw = new URL(rawUrl);
-                    const embeddedHeaders = parsedRaw.searchParams.get('headers');
-                    const hostOverride = parsedRaw.searchParams.get('host');
-                    if (embeddedHeaders) {
-                        try { Object.assign(extraHeaders, JSON.parse(embeddedHeaders)); } catch { }
-                    }
-                    if (hostOverride) {
-                        try { extraHeaders['Host'] = new URL(hostOverride).host; } catch { }
-                    }
-                }
+                
                 if (q.tmdb_movie || q.tmdb_tv || q.tmdb_show || q.tmdb_season) {
                     try {
                         const k = env.TMDB_API_KEY;
@@ -420,6 +396,45 @@ export async function onRequest({ request, env }) {
                         return new Response(JSON.stringify({ error: err.message }), { status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
                     }
                 }
+                
+                if (q.tt) {
+                    const upstream = await fetch(proxyUrl, {
+                        headers: { ...clientHeaders, 'User-Agent': getUA() }
+                    });
+                    const buf = await upstream.arrayBuffer();
+                    const full = new Uint8Array(buf);
+                    const stripped = full[0] === 0x89 ? full.slice(120) : full;
+                    return new Response(stripped, { headers: { 'Content-Type': 'video/MP2T', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'public, max-age=3600' } });
+                }
+                
+                const matchedSource = SOURCES.find(cfg => q[cfg.proxyParam]);
+                if (matchedSource) {
+                    const mod = SOURCE_MODULES[matchedSource.key];
+                    const cfg = SOURCE_MAP[matchedSource.key];
+                    let extraHeaders = { ...(mod.VERIFY_HEADERS || {}) };
+
+                    const parsedRaw = new URL(rawUrl);
+                    const embeddedHeaders = parsedRaw.searchParams.get('headers');
+                    const hostOverride = parsedRaw.searchParams.get('host');
+                    if (embeddedHeaders) {
+                        try { Object.assign(extraHeaders, JSON.parse(embeddedHeaders)); } catch { }
+                    }
+                    if (hostOverride) {
+                        try { extraHeaders['Host'] = new URL(hostOverride).host; } catch { }
+                    }
+                    
+                    // Forward request to proxy with headers
+                    const upstream = await fetch(proxyUrl, {
+                        headers: { ...clientHeaders, ...extraHeaders, 'User-Agent': getUA() }
+                    });
+                    return upstream;
+                }
+                
+                // Fallback: forward general proxy requests with headers
+                const upstream = await fetch(proxyUrl, {
+                    headers: { ...clientHeaders, 'User-Agent': getUA() }
+                });
+                return upstream;
             } catch (err) {
                 return new Response(JSON.stringify({ error: err.message }), { status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
             }
