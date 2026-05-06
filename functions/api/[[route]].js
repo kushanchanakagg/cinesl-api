@@ -318,13 +318,9 @@ export async function onRequest({ request, env }) {
         const { id } = q;
         if (!id) return new Response(JSON.stringify({ error: 'missing id' }), { status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
         try {
-            const [sources, meta, subtitles] = await Promise.all([
-                getAllWorkingSources(id, null, null, clientIP, env),
-                getMetadata(id, null, null, env),
-                fetchSubtitles(`${SUBTITLE_BASE}/movie/${id}`),
-            ]);
+            const sources = await getAllWorkingSources(id, null, null, clientIP, env);
             if (!sources.length) return new Response(JSON.stringify({ error: 'no working sources found' }), { status: 502, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
-            return new Response(JSON.stringify({ sources, subtitles: subtitles || [], meta }, null, 2), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+            return new Response(JSON.stringify(sources, null, 2), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
         } catch (e) {
             return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
         }
@@ -334,41 +330,17 @@ export async function onRequest({ request, env }) {
         const { id, season: s, episode: e } = q;
         if (!id || !s || !e) return new Response(JSON.stringify({ error: 'missing id, season, or episode' }), { status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
         try {
-            const [sources, meta, subtitles] = await Promise.all([
-                getAllWorkingSources(id, s, e, clientIP, env),
-                getMetadata(id, s, e, env),
-                fetchSubtitles(`${SUBTITLE_BASE}/tv/${id}/${s}/${e}`),
-            ]);
+            const sources = await getAllWorkingSources(id, s, e, clientIP, env);
             if (!sources.length) return new Response(JSON.stringify({ error: 'no working sources found' }), { status: 502, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
-            return new Response(JSON.stringify({ sources, subtitles: subtitles || [], meta }, null, 2), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+            return new Response(JSON.stringify({ sources }, null, 2), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
         } catch (e) {
             return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
         }
     }
 
-    const subtitleMovieMatch = pathname.match(/^\/api\/subtitles\/movie\/([^/]+)$/);
-    if (subtitleMovieMatch) {
-        const id = subtitleMovieMatch[1];
-        try {
-            const subtitles = await fetchSubtitles(`${SUBTITLE_BASE}/movie/${id}`);
-            if (!subtitles) return new Response(JSON.stringify({ error: 'no subtitles found' }), { status: 404, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
-            return new Response(JSON.stringify(subtitles, null, 2), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
-        } catch (e) {
-            return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
-        }
-    }
+    // Subtitle endpoints disabled
 
-    const subtitleTvMatch = pathname.match(/^\/api\/subtitles\/tv\/([^/]+)\/([^/]+)\/([^/]+)$/);
-    if (subtitleTvMatch) {
-        const [, id, season, episode] = subtitleTvMatch;
-        try {
-            const subtitles = await fetchSubtitles(`${SUBTITLE_BASE}/tv/${id}/${season}/${episode}`);
-            if (!subtitles) return new Response(JSON.stringify({ error: 'no subtitles found' }), { status: 404, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
-            return new Response(JSON.stringify(subtitles, null, 2), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
-        } catch (e) {
-            return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
-        }
-    }
+    // TV subtitle endpoints disabled
 
     const testMatch = pathname.match(/^\/api\/test\/([^/]+)$/);
     if (testMatch) {
